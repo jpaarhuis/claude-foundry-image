@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "jpaarhuis",
+  "description": "Claude Code plugins by Jeffrey Paarhuis.",
+  "owner": {
+    "name": "Jeffrey Paarhuis",
+    "url": "https://github.com/jpaarhuis"
+  },
+  "plugins": [
+    {
+      "name": "foundry-image",
+      "description": "Generate and edit images with an Azure AI Foundry image deployment. Adds generate_image / edit_image tools plus a skill that knows how to prompt them.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

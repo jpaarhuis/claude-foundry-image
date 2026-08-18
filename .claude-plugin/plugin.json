@@ -1,0 +1,13 @@
+{
+  "name": "foundry-image",
+  "version": "1.0.0",
+  "description": "Generate and edit images from Claude Code with an image model deployed on Azure AI Foundry (MAI image API). Images are written to disk; only the path enters the conversation.",
+  "author": {
+    "name": "Jeffrey Paarhuis",
+    "url": "https://github.com/jpaarhuis"
+  },
+  "homepage": "https://github.com/jpaarhuis/claude-foundry-image",
+  "repository": "https://github.com/jpaarhuis/claude-foundry-image",
+  "license": "MIT",
+  "keywords": ["image-generation", "azure", "foundry", "mcp", "gpt-image"]
+}

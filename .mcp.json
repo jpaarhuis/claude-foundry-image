@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "foundry-image": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/server.mjs"],
+      "env": {
+        "MAI_IMAGE_ENDPOINT": "${MAI_IMAGE_ENDPOINT:-}",
+        "MAI_IMAGE_DEPLOYMENT": "${MAI_IMAGE_DEPLOYMENT:-}",
+        "MAI_IMAGE_API_KEY": "${MAI_IMAGE_API_KEY:-}",
+        "MAI_IMAGE_OUTPUT_DIR": "${MAI_IMAGE_OUTPUT_DIR:-}"
+      }
+    }
+  }
+}
