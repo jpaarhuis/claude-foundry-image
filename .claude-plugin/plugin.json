@@ -1,7 +1,7 @@
 {
   "name": "foundry-image",
-  "version": "1.0.0",
-  "description": "Generate and edit images from Claude Code with an image model deployed on Azure AI Foundry (MAI image API). Images are written to disk; only the path enters the conversation.",
+  "version": "1.1.0",
+  "description": "Generate and edit images from Claude Code with an image model deployed on Azure AI Foundry (MAI image API or gpt-image-2 via the OpenAI-compatible API). Images are written to disk; only the path enters the conversation.",
   "author": {
     "name": "Jeffrey Paarhuis",
     "url": "https://github.com/jpaarhuis"

@@ -22,10 +22,15 @@ SendUserFile, or an artifact), open it so they can see the result.
 1. **Turn the request into a full prompt.** Users write "a cat on a laptop". Expand to
    subject, setting, style, composition, lighting, colour palette, mood, and what to avoid.
    Keep it one paragraph. Do not ask the user to write this themselves.
-2. **Pick dimensions.** Constraints from the API: each side ≥ 768 px, width × height
-   ≤ 1 048 576 px. Valid: `1024x1024` (default), `1024x768`, `768x1024`, `1280x800`,
-   `800x1280`. Invalid: `1024x1536`, `1920x1080`. For a wide banner use `1280x800` and
-   tell the user to crop, or generate `1024x768`.
+2. **Pick the backend and dimensions.** `model: "mai"` (default) or `model: "gpt-image"`
+   (gpt-image-2: stronger prompt adherence and complex scenes; use it when the user
+   asks for gpt-image, when a skill prescribes it, or when MAI output misses details).
+   - MAI: each side ≥ 768 px, width × height ≤ 1 048 576 px. Valid: `1024x1024`
+     (default), `1024x768`, `768x1024`, `1280x800`, `800x1280`. Invalid: `1024x1536`,
+     `1920x1080`. For a wide banner use `1280x800` and tell the user to crop.
+   - gpt-image: width/height only choose the aspect; the API renders `1536x1024`
+     (landscape), `1024x1536` (portrait) or `1024x1024`. Pass `quality` `low` for drafts,
+     `medium` (default) for most work, `high` for final deliverables.
 3. **Choose the output path.** If the user is inside a project and the image belongs to
    it (README asset, app icon, docs figure), write into the repo with a descriptive name
    (`docs/img/hero-dark.png`). Otherwise omit `output_path` and let it fall back to
@@ -60,8 +65,9 @@ source.
 
 ## Errors
 
-- `MAI_IMAGE_* is not configured` → run `check_config`, then point the user to the
-  `setup` skill (`/foundry-image:setup`). Do not ask them to paste the API key in chat.
+- `MAI_IMAGE_* is not configured` / `GPT_IMAGE_* is not configured` → run `check_config`,
+  then point the user to the `setup` skill (`/foundry-image:setup`). Do not ask them to
+  paste the API key in chat. If only the other backend is configured, use that one.
 - `exceeds the MAI limit` → adjust dimensions per step 2.
 - `HTTP 401/403` → wrong key or key for another resource; `HTTP 404` → endpoint path or
   deployment name wrong. Report the exact message and suggest `check_config`.

@@ -11,6 +11,10 @@ const env = { ...process.env };
 delete env.MAI_IMAGE_ENDPOINT;
 delete env.MAI_IMAGE_DEPLOYMENT;
 delete env.MAI_IMAGE_API_KEY;
+delete env.GPT_IMAGE_ENDPOINT;
+delete env.GPT_IMAGE_DEPLOYMENT;
+delete env.GPT_IMAGE_API_KEY;
+delete env.IMAGE_DEFAULT_MODEL;
 
 const requests = [
   { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
@@ -23,6 +27,24 @@ const requests = [
     params: { name: "generate_image", arguments: { prompt: "x", width: 1024, height: 1536 } },
   },
   { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "generate_image", arguments: { prompt: "x" } } },
+  {
+    jsonrpc: "2.0",
+    id: 6,
+    method: "tools/call",
+    params: { name: "generate_image", arguments: { prompt: "x", model: "gpt-image" } },
+  },
+  {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: { name: "generate_image", arguments: { prompt: "x", model: "dall-e" } },
+  },
+  {
+    jsonrpc: "2.0",
+    id: 8,
+    method: "tools/call",
+    params: { name: "generate_image", arguments: { prompt: "x", model: "gpt-image", size: "2000x2000" } },
+  },
 ];
 
 const child = spawn(process.execPath, [server], { env, stdio: ["pipe", "pipe", "inherit"] });
@@ -55,10 +77,15 @@ const check = setInterval(() => {
   expect(/exceeds the MAI limit/.test(byId[4]?.content?.[0]?.text), "1024x1536 must be rejected");
   expect(byId[4]?.isError === true, "rejected call sets isError");
   expect(/MAI_IMAGE_ENDPOINT is not configured/.test(byId[5]?.content?.[0]?.text), "missing config error");
+  expect(/GPT_IMAGE_ENDPOINT is not configured/.test(byId[6]?.content?.[0]?.text), "gpt-image missing config error");
+  expect(/model must be one of/.test(byId[7]?.content?.[0]?.text), "unknown model rejected");
+  expect(/size must be one of/.test(byId[8]?.content?.[0]?.text), "bad gpt size rejected");
+  const gen = (byId[2]?.tools || []).find((t) => t.name === "generate_image");
+  expect(gen?.inputSchema?.properties?.model?.enum?.includes("gpt-image"), "generate_image exposes model enum");
 
   if (failures.length) {
     console.error("FAIL\n- " + failures.join("\n- "));
     process.exit(1);
   }
-  console.log("ok: handshake, tool list, guards, check_config");
+  console.log("ok: handshake, tool list, guards (mai + gpt-image), check_config");
 }, 50);

@@ -15,6 +15,15 @@ conversation then has image generation.
 | `MAI_IMAGE_DEPLOYMENT` | yes | Deployment name as shown in Foundry (e.g. `MAI-Image-2.5-Pro`) |
 | `MAI_IMAGE_API_KEY` | yes | Key 1 or Key 2 of the Foundry resource |
 | `MAI_IMAGE_OUTPUT_DIR` | no | Folder for images when no `output_path` is given. Default: OS temp dir |
+| `GPT_IMAGE_ENDPOINT` | for gpt-image | Resource base URL: `https://<resource>.services.ai.azure.com` (Foundry) or `https://<resource>.openai.azure.com` |
+| `GPT_IMAGE_DEPLOYMENT` | for gpt-image | Deployment name of the gpt-image model, e.g. `gpt-image-2` |
+| `GPT_IMAGE_API_KEY` | no | Only when gpt-image is on another resource; defaults to `MAI_IMAGE_API_KEY` |
+| `GPT_IMAGE_API_VERSION` | no | Default `2025-04-01-preview` |
+| `IMAGE_DEFAULT_MODEL` | no | `mai` (default) or `gpt-image` |
+
+At least one backend must be complete. The MAI block is the original setup; the
+`GPT_IMAGE_*` block adds `gpt-image-2` (OpenAI-compatible Azure API) and is selected per
+call with `model: "gpt-image"`.
 
 ## Where to put them (pick one)
 
@@ -27,7 +36,9 @@ affects Claude Code, survives plugin updates.
     "MAI_IMAGE_ENDPOINT": "https://<resource>.services.ai.azure.com/mai/v1/images/generations",
     "MAI_IMAGE_DEPLOYMENT": "<deployment-name>",
     "MAI_IMAGE_API_KEY": "<key>",
-    "MAI_IMAGE_OUTPUT_DIR": "C:/Users/<you>/Pictures/ai"
+    "MAI_IMAGE_OUTPUT_DIR": "C:/Users/<you>/Pictures/ai",
+    "GPT_IMAGE_ENDPOINT": "https://<resource>.services.ai.azure.com",
+    "GPT_IMAGE_DEPLOYMENT": "gpt-image-2"
   }
 }
 ```
@@ -49,7 +60,9 @@ Restart Claude Code afterwards — env and MCP config are read at startup.
 
 1. Call `check_config`. If it says `Configuration OK.`, stop; nothing to do.
 2. Ask the user for **endpoint** and **deployment** (not secret; `AskUserQuestion` is
-   fine). Ask which storage they prefer: `settings.json` or OS env.
+   fine), and whether they also (or only) want the gpt-image backend: then also the
+   `GPT_IMAGE_ENDPOINT` (resource base URL) and `GPT_IMAGE_DEPLOYMENT`. Ask which storage
+   they prefer: `settings.json` or OS env.
 3. **Never ask the user to paste the API key into the chat.** Instead:
    - settings.json route: write the `env` block with endpoint, deployment, output dir,
      and the literal placeholder `"MAI_IMAGE_API_KEY": "<paste-key-here>"`; then tell the
@@ -69,3 +82,7 @@ Restart Claude Code afterwards — env and MCP config are read at startup.
   Endpoint*. The endpoint shown there is the base URL; append
   `/mai/v1/images/generations`.
 - Deployment name: Foundry portal → *Deployments* → the image model → *Name*.
+- gpt-image-2: deploy it in the same Foundry resource (Model catalog → gpt-image-2 →
+  Deploy); `GPT_IMAGE_ENDPOINT` is the resource base URL without any path, the key is
+  the same as for MAI. Verify with
+  `az cognitiveservices account deployment list -n <resource> -g <rg>`.
