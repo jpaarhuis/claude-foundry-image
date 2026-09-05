@@ -28,9 +28,11 @@ SendUserFile, or an artifact), open it so they can see the result.
    - MAI: each side ≥ 768 px, width × height ≤ 1 048 576 px. Valid: `1024x1024`
      (default), `1024x768`, `768x1024`, `1280x800`, `800x1280`. Invalid: `1024x1536`,
      `1920x1080`. For a wide banner use `1280x800` and tell the user to crop.
-   - gpt-image: width/height only choose the aspect; the API renders `1536x1024`
-     (landscape), `1024x1536` (portrait) or `1024x1024`. Pass `quality` `low` for drafts,
-     `medium` (default) for most work, `high` for final deliverables.
+   - gpt-image: any width/height with both sides divisible by 16 is rendered as-is
+     (`2048x1152` for 16:9, `1024x1024`, `1536x1024` ...); other values fall back to the
+     nearest classic size. Pass `quality` `low` for drafts, `medium` (default) for most
+     work, `high` for final deliverables. Edits keep the input aspect (`size` auto) and
+     faces (`input_fidelity` high): send a finished image plus one short instruction.
 3. **Choose the output path.** If the user is inside a project and the image belongs to
    it (README asset, app icon, docs figure), write into the repo with a descriptive name
    (`docs/img/hero-dark.png`). Otherwise omit `output_path` and let it fall back to

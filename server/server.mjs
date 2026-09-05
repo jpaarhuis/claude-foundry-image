@@ -19,10 +19,37 @@
 //
 //   IMAGE_DEFAULT_MODEL      optional; "mai" (default) or "gpt-image"
 //   MAI_IMAGE_OUTPUT_DIR     optional; where images land when no output_path is given
+//
+// All of these can also live in an env file: ~/.claude/foundry-image.env by default, or the
+// path in FOUNDRY_IMAGE_ENV_FILE. Lines are KEY=VALUE (quotes and `export ` allowed, # comments).
+// A variable that is already set (non-empty) in the process environment wins over the file.
 
 import { writeFile, readFile, mkdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname, basename, extname } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+
+const ENV_FILE =
+  (process.env.FOUNDRY_IMAGE_ENV_FILE || "").trim() || join(homedir(), ".claude", "foundry-image.env");
+
+function loadEnvFile(path) {
+  if (!existsSync(path)) return false;
+  for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) continue;
+    let value = m[2].trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    if (/^<.*>$/.test(value)) continue; // untouched "<paste-key-here>" placeholder
+    if (!(process.env[m[1]] || "").trim()) process.env[m[1]] = value;
+  }
+  return true;
+}
+
+const ENV_FILE_LOADED = loadEnvFile(ENV_FILE);
 
 const MAI_GEN_PATH = "/mai/v1/images/generations";
 const MAI_EDIT_PATH = "/mai/v1/images/edits";
@@ -131,13 +158,22 @@ function gptRoute(kind) {
   return { url: `${endpoint}/openai/v1/${path}`, model: config("GPT_IMAGE_DEPLOYMENT") };
 }
 
+// gpt-image-2 accepts any WxH with both sides divisible by 16 (e.g. 2048x1152 for 16:9) and
+// "auto" (edits: same aspect as the input). The three classic sizes still work.
+function validGptSize(size) {
+  if (size === "auto" || GPT_SIZES.includes(size)) return true;
+  const m = /^(\d+)x(\d+)$/.exec(size);
+  return !!m && Number(m[1]) % 16 === 0 && Number(m[2]) % 16 === 0 && Number(m[1]) >= 256 && Number(m[2]) >= 256;
+}
+
 function gptSize(args, width, height) {
   if (args.size) {
-    if (!GPT_SIZES.includes(args.size) && args.size !== "auto") {
-      throw new Error(`size must be one of ${GPT_SIZES.join(", ")} or auto`);
+    if (!validGptSize(args.size)) {
+      throw new Error(`size must be ${GPT_SIZES.join(", ")}, auto, or WxH with both sides divisible by 16`);
     }
     return args.size;
   }
+  if (args.width && args.height && validGptSize(`${width}x${height}`)) return `${width}x${height}`;
   const ratio = width / height;
   if (ratio > 1.15) return "1536x1024";
   if (ratio < 0.87) return "1024x1536";
@@ -174,7 +210,8 @@ async function gptEdit(args, bytes, mime, name) {
   if (route.model) form.set("model", route.model);
   form.set("prompt", args.prompt);
   form.set("quality", gptQuality(args));
-  if (args.size) form.set("size", gptSize(args, 1, 1));
+  form.set("size", args.size ? gptSize(args, 1, 1) : "auto"); // auto = same aspect as the input
+  form.set("input_fidelity", "high"); // keep faces and details of the input
   form.set("image", new Blob([bytes], { type: mime }), name);
   const res = await fetch(route.url, {
     method: "POST",
@@ -273,18 +310,25 @@ function checkConfig() {
   report("GPT_IMAGE_API_KEY", false);
   lines.push(`GPT_IMAGE_API_VERSION: ${env("GPT_IMAGE_API_VERSION") || `(default) ${GPT_API_VERSION_DEFAULT}`}`);
   const gptOk = gptSet && !!(env("GPT_IMAGE_API_KEY") || env("MAI_IMAGE_API_KEY"));
-  lines.push(gptOk ? "gpt-image: ready" : "gpt-image: not configured (optional)");
+  lines.push(
+    !gptOk
+      ? "gpt-image: not configured (optional)"
+      : env("GPT_IMAGE_API_KEY")
+        ? "gpt-image: ready"
+        : "gpt-image: ready with MAI_IMAGE_API_KEY (set GPT_IMAGE_API_KEY if the deployment is on another resource)"
+  );
 
   lines.push("", `IMAGE_DEFAULT_MODEL: ${env("IMAGE_DEFAULT_MODEL") || "(default) mai"}`);
   lines.push(`MAI_IMAGE_OUTPUT_DIR: ${env("MAI_IMAGE_OUTPUT_DIR") || `(default) ${OUT_DIR}`}`);
+  lines.push(`env file: ${ENV_FILE} (${ENV_FILE_LOADED ? "loaded" : "not found"})`);
 
   const ok = maiOk || gptOk;
   lines.unshift(ok ? "Configuration OK." : "Configuration incomplete.");
   if (!ok) {
     lines.push(
       "",
-      'Set the missing variables once in ~/.claude/settings.json under "env" ' +
-        "(or in your OS environment) and restart Claude Code. See the setup skill."
+      `Set the missing variables once in the env file (${ENV_FILE}), in ~/.claude/settings.json ` +
+        'under "env", or in your OS environment, and restart Claude Code. See the setup skill.'
     );
   }
   return lines.join("\n");
@@ -315,9 +359,10 @@ const TOOLS = [
       "returns its path; it is not returned inline. Use a detailed prompt covering subject, " +
       'style, composition, lighting and colors. With model "mai": each side must be at least ' +
       "768 pixels and width x height must not exceed 1048576 pixels (1024x1024, 1280x800, " +
-      '768x1024 are valid; 1024x1536 is not). With model "gpt-image" (gpt-image-2): width/height ' +
-      "only pick the aspect ratio, the API renders 1536x1024 (landscape), 1024x1536 (portrait) or " +
-      "1024x1024; pass `quality` low/medium/high (default medium).",
+      '768x1024 are valid; 1024x1536 is not). With model "gpt-image" (gpt-image-2): any width/height ' +
+      "with both sides divisible by 16 is rendered as-is (2048x1152 for 16:9, 1024x1024, 1536x1024 ...); " +
+      "other values fall back to the nearest of 1536x1024 / 1024x1536 / 1024x1024. Pass `quality` " +
+      "low/medium/high (default medium).",
     inputSchema: {
       type: "object",
       properties: {
@@ -328,7 +373,7 @@ const TOOLS = [
         quality: { type: "string", enum: GPT_QUALITIES, description: "gpt-image only. Default medium." },
         size: {
           type: "string",
-          description: "gpt-image only: explicit size (1024x1024, 1536x1024, 1024x1536, auto). Overrides width/height.",
+          description: "gpt-image only: explicit size (WxH, both divisible by 16, or auto). Overrides width/height.",
         },
         output_path: {
           type: "string",
@@ -345,7 +390,9 @@ const TOOLS = [
     description:
       "Edit an existing PNG or JPEG on Azure AI Foundry, following a text instruction. The " +
       "result is written to disk as a PNG and the tool returns its path. The source file is " +
-      'never modified. Pick the backend with `model` ("mai" or "gpt-image").',
+      'never modified. Pick the backend with `model` ("mai" or "gpt-image"). With gpt-image the ' +
+      "result keeps the input's aspect ratio (size auto) and faces/details (input_fidelity high) " +
+      "unless `size` is given.",
     inputSchema: {
       type: "object",
       properties: {
@@ -353,7 +400,7 @@ const TOOLS = [
         prompt: { type: "string", description: "What to change in the image." },
         model: MODEL_PROP,
         quality: { type: "string", enum: GPT_QUALITIES, description: "gpt-image only. Default medium." },
-        size: { type: "string", description: "gpt-image only: output size (1024x1024, 1536x1024, 1024x1536, auto)." },
+        size: { type: "string", description: "gpt-image only: output size (WxH, both divisible by 16, or auto = input aspect)." },
         output_path: { type: "string", description: "Where to write the result. Must end in .png." },
       },
       required: ["image", "prompt"],

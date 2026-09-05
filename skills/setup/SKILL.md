@@ -27,7 +27,23 @@ call with `model: "gpt-image"`.
 
 ## Where to put them (pick one)
 
-**Recommended: `~/.claude/settings.json` → `env`.** One file, works on every OS, only
+**Recommended: the env file `~/.claude/foundry-image.env`.** Plain `KEY=VALUE` lines,
+`#` comments, quotes optional. Read once at server start; anything already set in the
+process environment (OS env, `settings.json` env) wins over the file. Another path can be
+given in `FOUNDRY_IMAGE_ENV_FILE`. Survives plugin updates, is outside every repo, and
+`check_config` prints whether it was found.
+
+```
+MAI_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com/mai/v1/images/generations
+MAI_IMAGE_DEPLOYMENT=MAI-Image-2.5-Pro
+MAI_IMAGE_API_KEY=<paste-key-here>
+MAI_IMAGE_OUTPUT_DIR=C:/Users/<you>/Pictures/ai
+GPT_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com
+GPT_IMAGE_DEPLOYMENT=gpt-image-2
+GPT_IMAGE_API_KEY=<paste-key-here>
+```
+
+**Alternative: `~/.claude/settings.json` → `env`.** One file, works on every OS, only
 affects Claude Code, survives plugin updates.
 
 ```json
@@ -64,6 +80,11 @@ Restart Claude Code afterwards — env and MCP config are read at startup.
    `GPT_IMAGE_ENDPOINT` (resource base URL) and `GPT_IMAGE_DEPLOYMENT`. Ask which storage
    they prefer: `settings.json` or OS env.
 3. **Never ask the user to paste the API key into the chat.** Instead:
+   - env file route: write `~/.claude/foundry-image.env` with the non-secret values and
+     the literal placeholder `GPT_IMAGE_API_KEY=<paste-key-here>` (same for MAI); tell the
+     user to replace the placeholder, or give them a one-liner that pipes the key from
+     `az` into the file without printing it, e.g. on Windows:
+     `$k = az cognitiveservices account keys list -n <resource> -g <rg> --query key1 -o tsv; (Get-Content $f) -replace '^GPT_IMAGE_API_KEY=.*', "GPT_IMAGE_API_KEY=$k" | Set-Content $f`
    - settings.json route: write the `env` block with endpoint, deployment, output dir,
      and the literal placeholder `"MAI_IMAGE_API_KEY": "<paste-key-here>"`; then tell the
      user to open the file and replace the placeholder themselves.
