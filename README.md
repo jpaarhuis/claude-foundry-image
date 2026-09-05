@@ -29,8 +29,25 @@ Or in an interactive session: `/plugin` → Marketplaces → add `jpaarhuis/clau
 
 ## Configure (once)
 
-The server reads its settings from environment variables. Put them in
-`~/.claude/settings.json` under `env` — one file, all platforms, only Claude Code sees it:
+The server reads its settings from environment variables. Simplest: an **env file** at
+`~/.claude/foundry-image.env` (or any path in `FOUNDRY_IMAGE_ENV_FILE`), plain `KEY=VALUE`
+lines, `#` comments allowed:
+
+```
+MAI_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com/mai/v1/images/generations
+MAI_IMAGE_DEPLOYMENT=MAI-Image-2.5-Pro
+MAI_IMAGE_API_KEY=<key>
+MAI_IMAGE_OUTPUT_DIR=C:/Users/<you>/Pictures/ai
+GPT_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com
+GPT_IMAGE_DEPLOYMENT=gpt-image-2
+GPT_IMAGE_API_KEY=<key of that resource, if different>
+```
+
+The file is read when the server starts; a variable that is already set (non-empty) in
+the process environment wins over the file, so OS env vars and `settings.json` keep
+working and can override single values. Restart Claude Code after editing it.
+
+Alternative: `~/.claude/settings.json` under `env` — one file, all platforms, only Claude Code sees it:
 
 ```json
 {
@@ -64,6 +81,7 @@ Then, in any session: *"run check_config"* or `/foundry-image:setup` for a guide
 | `GPT_IMAGE_API_KEY` | no | Key for the gpt-image resource; defaults to `MAI_IMAGE_API_KEY` |
 | `GPT_IMAGE_API_VERSION` | no | Default `2025-04-01-preview` |
 | `IMAGE_DEFAULT_MODEL` | no | `mai` (default) or `gpt-image`: backend used when a call passes no `model` |
+| `FOUNDRY_IMAGE_ENV_FILE` | no | Path of the env file; default `~/.claude/foundry-image.env` |
 
 ## Use
 
@@ -81,7 +99,7 @@ Tool parameters, for reference:
 
 Dimension rules from the MAI API: each side ≥ 768 px and width × height ≤ 1 048 576 px.
 With `model: "gpt-image"` the width/height only pick the aspect ratio; the API renders
-`1536x1024`, `1024x1536` or `1024x1024` (or pass `size` directly) at `quality` low/medium/high.
+any size with both sides divisible by 16 (2048x1152 for 16:9; the classic 1536x1024 / 1024x1536 / 1024x1024 too) at `quality` low/medium/high; edits default to `auto` (input aspect) with `input_fidelity` high.
 So `1024x1024`, `1024x768`, `1280x800` work; `1024x1536` and `1920x1080` do not.
 
 ## Why env vars and not a config file or setup dialog?
