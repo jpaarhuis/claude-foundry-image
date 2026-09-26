@@ -1,109 +1,66 @@
 ---
 name: setup
-description: One-time configuration of the foundry-image plugin — set the Azure AI Foundry endpoint, deployment name and API key so the generate_image / edit_image tools work in every project. Use when the user installs the plugin, when check_config reports missing variables, when image generation fails with "is not configured", or when the user asks to "set up foundry-image", "configure image generation", or "change the image endpoint/key".
+description: One-time configuration of the foundry-image plugin — set the Azure AI Foundry endpoint and API key (and optionally the flare/sunburst deployment names) so the flare_image / sunburst_image tools work in every project. Use when the user installs the plugin, when check_config reports missing variables, when image generation fails with "is not configured", or when the user asks to "set up foundry-image", "configure image generation", or "change the image endpoint/key".
 ---
 
 # foundry-image setup
 
-The MCP server reads four environment variables. They must be visible to the Claude
-Code process that spawns the plugin's server. Set them **once**; every project and every
-conversation then has image generation.
+The MCP server needs one Azure AI Foundry resource with two deployments:
+`gpt-image-2.5-flare` and `gpt-image-2.5-sunburst`. It reads these environment variables:
 
 | Variable | Required | Value |
 |---|---|---|
-| `MAI_IMAGE_ENDPOINT` | yes | Full generation URL: `https://<resource>.services.ai.azure.com/mai/v1/images/generations` |
-| `MAI_IMAGE_DEPLOYMENT` | yes | Deployment name as shown in Foundry (e.g. `MAI-Image-2.5-Pro`) |
-| `MAI_IMAGE_API_KEY` | yes | Key 1 or Key 2 of the Foundry resource |
-| `MAI_IMAGE_OUTPUT_DIR` | no | Folder for images when no `output_path` is given. Default: OS temp dir |
-| `GPT_IMAGE_ENDPOINT` | for gpt-image | Resource base URL: `https://<resource>.services.ai.azure.com` (Foundry) or `https://<resource>.openai.azure.com` |
-| `GPT_IMAGE_DEPLOYMENT` | for gpt-image | Deployment name of the gpt-image model, e.g. `gpt-image-2` |
-| `GPT_IMAGE_API_KEY` | no | Only when gpt-image is on another resource; defaults to `MAI_IMAGE_API_KEY` |
-| `GPT_IMAGE_API_VERSION` | no | Default `2025-04-01-preview` |
-| `IMAGE_DEFAULT_MODEL` | no | `mai` (default) or `gpt-image` |
-
-At least one backend must be complete. The MAI block is the original setup; the
-`GPT_IMAGE_*` block adds `gpt-image-2` (OpenAI-compatible Azure API) and is selected per
-call with `model: "gpt-image"`.
+| `GPT_IMAGE_ENDPOINT` | yes | Resource base URL: `https://<resource>.services.ai.azure.com` (or `.openai.azure.com`) |
+| `GPT_IMAGE_API_KEY` | yes | Key 1 or Key 2 of that resource |
+| `GPT_IMAGE_FLARE_DEPLOYMENT` | no | Deployment name behind `flare_image`; default `gpt-image-2.5-flare` |
+| `GPT_IMAGE_SUNBURST_DEPLOYMENT` | no | Deployment name behind `sunburst_image`; default `gpt-image-2.5-sunburst` |
+| `IMAGE_OUTPUT_DIR` | no | Folder for images when no `output_path` is given. Default: OS temp dir |
+| `FOUNDRY_IMAGE_ENV_FILE` | no | Path of the env file; default `~/.claude/foundry-image.env` |
 
 ## Where to put them (pick one)
 
 **Recommended: the env file `~/.claude/foundry-image.env`.** Plain `KEY=VALUE` lines,
 `#` comments, quotes optional. Read once at server start; anything already set in the
-process environment (OS env, `settings.json` env) wins over the file. Another path can be
-given in `FOUNDRY_IMAGE_ENV_FILE`. Survives plugin updates, is outside every repo, and
-`check_config` prints whether it was found.
+process environment (OS env, `settings.json` env) wins over the file. Survives plugin
+updates, is outside every repo, and `check_config` prints whether it was found.
 
 ```
-MAI_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com/mai/v1/images/generations
-MAI_IMAGE_DEPLOYMENT=MAI-Image-2.5-Pro
-MAI_IMAGE_API_KEY=<paste-key-here>
-MAI_IMAGE_OUTPUT_DIR=C:/Users/<you>/Pictures/ai
 GPT_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com
-GPT_IMAGE_DEPLOYMENT=gpt-image-2
 GPT_IMAGE_API_KEY=<paste-key-here>
+IMAGE_OUTPUT_DIR=C:/Users/<you>/Pictures/ai
 ```
 
 **Alternative: `~/.claude/settings.json` → `env`.** One file, works on every OS, only
-affects Claude Code, survives plugin updates.
-
-```json
-{
-  "env": {
-    "MAI_IMAGE_ENDPOINT": "https://<resource>.services.ai.azure.com/mai/v1/images/generations",
-    "MAI_IMAGE_DEPLOYMENT": "<deployment-name>",
-    "MAI_IMAGE_API_KEY": "<key>",
-    "MAI_IMAGE_OUTPUT_DIR": "C:/Users/<you>/Pictures/ai",
-    "GPT_IMAGE_ENDPOINT": "https://<resource>.services.ai.azure.com",
-    "GPT_IMAGE_DEPLOYMENT": "gpt-image-2"
-  }
-}
-```
-
-Merge into the existing `env` object if there is one. The key is stored in plaintext in
-that file, same as any local MCP credential; keep the file out of sync/backup tools that
-you would not trust with a secret.
+affects Claude Code, survives plugin updates. Merge into the existing `env` object. The
+key is stored in plaintext; keep the file out of sync/backup tools you would not trust
+with a secret.
 
 **Alternative: OS user environment.** Also reachable by other tools on the machine.
-
-- Windows: `setx MAI_IMAGE_ENDPOINT "https://…/mai/v1/images/generations"` (repeat per
-  variable), then open a new terminal.
-- macOS/Linux: `export MAI_IMAGE_…=…` in `~/.zshrc` / `~/.bashrc`, or `launchctl setenv`
-  on macOS for GUI-launched apps.
+Windows: `setx GPT_IMAGE_ENDPOINT "https://…"`; macOS/Linux: `export` in the shell profile.
 
 Restart Claude Code afterwards — env and MCP config are read at startup.
 
 ## Procedure for Claude
 
 1. Call `check_config`. If it says `Configuration OK.`, stop; nothing to do.
-2. Ask the user for **endpoint** and **deployment** (not secret; `AskUserQuestion` is
-   fine), and whether they also (or only) want the gpt-image backend: then also the
-   `GPT_IMAGE_ENDPOINT` (resource base URL) and `GPT_IMAGE_DEPLOYMENT`. Ask which storage
-   they prefer: `settings.json` or OS env.
-3. **Never ask the user to paste the API key into the chat.** Instead:
-   - env file route: write `~/.claude/foundry-image.env` with the non-secret values and
-     the literal placeholder `GPT_IMAGE_API_KEY=<paste-key-here>` (same for MAI); tell the
-     user to replace the placeholder, or give them a one-liner that pipes the key from
-     `az` into the file without printing it, e.g. on Windows:
-     `$k = az cognitiveservices account keys list -n <resource> -g <rg> --query key1 -o tsv; (Get-Content $f) -replace '^GPT_IMAGE_API_KEY=.*', "GPT_IMAGE_API_KEY=$k" | Set-Content $f`
-   - settings.json route: write the `env` block with endpoint, deployment, output dir,
-     and the literal placeholder `"MAI_IMAGE_API_KEY": "<paste-key-here>"`; then tell the
-     user to open the file and replace the placeholder themselves.
-   - OS env route: give them the `setx` / `export` command for the key to run
-     themselves, and run the non-secret ones for them if they agree.
-   If the key already lives in a secret store they control (Azure Container App secret,
-   Key Vault, password manager), give a one-liner that pipes it into the env var without
-   printing it, e.g. on Windows:
-   `powershell -Command "$k = az keyvault secret show --vault-name <v> --name <n> --query value -o tsv; [Environment]::SetEnvironmentVariable('MAI_IMAGE_API_KEY', $k, 'User')"`.
+2. Ask the user which Foundry resource to use (not secret; `AskUserQuestion` is fine) and
+   check the deployments exist:
+   `az cognitiveservices account deployment list -n <resource> -g <rg> -o table`.
+   Missing ones can be created (region must offer gpt-image-2.5, e.g. swedencentral,
+   polandcentral, eastus2, westus3, uaenorth; GlobalStandard only):
+   `az cognitiveservices account deployment create -n <resource> -g <rg> --deployment-name gpt-image-2.5-flare --model-name gpt-image-2.5-flare --model-version 2026-09-08 --model-format OpenAI --sku-name GlobalStandard --sku-capacity 10`
+   (same for `gpt-image-2.5-sunburst`). Confirm with the user before creating.
+3. **Never ask the user to paste the API key into the chat.** Write the env file with the
+   non-secret values and the literal placeholder `GPT_IMAGE_API_KEY=<paste-key-here>`,
+   then either tell the user to replace it, or give a one-liner that pipes the key from
+   `az` into the file without printing it, e.g. on Windows PowerShell:
+   `$f = "$HOME/.claude/foundry-image.env"; $k = az cognitiveservices account keys list -n <resource> -g <rg> --query key1 -o tsv; (Get-Content $f) -replace '^GPT_IMAGE_API_KEY=.*', "GPT_IMAGE_API_KEY=$k" | Set-Content $f`
 4. Tell the user to restart Claude Code, then run `check_config` again and do one
-   `generate_image` with a short prompt to prove the pipeline end-to-end.
+   `flare_image` call with a short prompt at `quality: low` to prove the pipeline.
 
 ## Finding the values in Azure
 
 - Endpoint + key: Azure portal → the AI Foundry / AI Services resource → *Keys and
-  Endpoint*. The endpoint shown there is the base URL; append
-  `/mai/v1/images/generations`.
-- Deployment name: Foundry portal → *Deployments* → the image model → *Name*.
-- gpt-image-2: deploy it in the same Foundry resource (Model catalog → gpt-image-2 →
-  Deploy); `GPT_IMAGE_ENDPOINT` is the resource base URL without any path, the key is
-  the same as for MAI. Verify with
-  `az cognitiveservices account deployment list -n <resource> -g <rg>`.
+  Endpoint*. Use the base URL without any path.
+- Deployment names: Foundry portal → *Deployments*, or the `az … deployment list` above.
+- Region availability: `az cognitiveservices model list --location <region> --query "[?contains(model.name,'gpt-image')].model.name" -o tsv`.

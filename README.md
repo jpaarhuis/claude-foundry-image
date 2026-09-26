@@ -1,14 +1,20 @@
 # claude-foundry-image
 
 Claude Code plugin that gives every project and every conversation an image generator
-backed by your own Azure AI Foundry deployments: the MAI image API (e.g. `MAI-Image-2.5-Pro`)
-and/or `gpt-image-2` through the OpenAI-compatible Azure API. Pick the backend per call with
-`model: "mai" | "gpt-image"`.
+backed by your own Azure AI Foundry deployments of OpenAI's **gpt-image-2.5**, with one
+tool per model:
+
+| Tool | Model | Pick it for |
+|---|---|---|
+| `flare_image` | `gpt-image-2.5-flare` | The default: fast (about 15–25 s at low/medium) high-quality images for everyday work. Blog and social visuals, thumbnails, illustrations, icons, drafts, variations, quick edits. |
+| `sunburst_image` | `gpt-image-2.5-sunburst` | The most detailed model, slower. Final deliverables and precise edits that change one thing and keep the rest intact. |
+
+Both tools generate from a prompt, or edit an existing PNG/JPEG when you pass `image`.
 
 - **MCP server** (`server/server.mjs`) — Node ≥ 18, zero dependencies. Tools:
-  `generate_image`, `edit_image`, `check_config`.
-- **Skill `generate-image`** — teaches Claude when to reach for the tools, how to expand
-  a one-liner into a usable prompt, valid dimensions, where to write files.
+  `flare_image`, `sunburst_image`, `check_config`.
+- **Skill `generate-image`** — teaches Claude which model to pick, how to expand a
+  one-liner into a usable prompt, valid sizes, where to write files.
 - **Skill `setup`** — one-time configuration walkthrough.
 
 Images are written to disk; only the file path enters the conversation. No base64 in
@@ -27,6 +33,20 @@ claude plugin install foundry-image@jpaarhuis
 Or in an interactive session: `/plugin` → Marketplaces → add `jpaarhuis/claude-foundry-image`
 → install `foundry-image`.
 
+## Deploy the models
+
+Both models live on one Foundry resource in a region that offers gpt-image-2.5
+(September 2026: swedencentral, polandcentral, eastus2, westus3, uaenorth; GlobalStandard
+only). With the default deployment names nothing else needs configuring:
+
+```bash
+az cognitiveservices account deployment create -n <resource> -g <rg> --deployment-name gpt-image-2.5-flare --model-name gpt-image-2.5-flare --model-version 2026-09-08 --model-format OpenAI --sku-name GlobalStandard --sku-capacity 10
+```
+
+```bash
+az cognitiveservices account deployment create -n <resource> -g <rg> --deployment-name gpt-image-2.5-sunburst --model-name gpt-image-2.5-sunburst --model-version 2026-09-08 --model-format OpenAI --sku-name GlobalStandard --sku-capacity 10
+```
+
 ## Configure (once)
 
 The server reads its settings from environment variables. Simplest: an **env file** at
@@ -34,81 +54,62 @@ The server reads its settings from environment variables. Simplest: an **env fil
 lines, `#` comments allowed:
 
 ```
-MAI_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com/mai/v1/images/generations
-MAI_IMAGE_DEPLOYMENT=MAI-Image-2.5-Pro
-MAI_IMAGE_API_KEY=<key>
-MAI_IMAGE_OUTPUT_DIR=C:/Users/<you>/Pictures/ai
 GPT_IMAGE_ENDPOINT=https://<resource>.services.ai.azure.com
-GPT_IMAGE_DEPLOYMENT=gpt-image-2
-GPT_IMAGE_API_KEY=<key of that resource, if different>
+GPT_IMAGE_API_KEY=<key>
+IMAGE_OUTPUT_DIR=C:/Users/<you>/Pictures/ai
 ```
 
 The file is read when the server starts; a variable that is already set (non-empty) in
-the process environment wins over the file, so OS env vars and `settings.json` keep
+the process environment wins over the file, so OS env vars and `settings.json → env` keep
 working and can override single values. Restart Claude Code after editing it.
-
-Alternative: `~/.claude/settings.json` under `env` — one file, all platforms, only Claude Code sees it:
-
-```json
-{
-  "env": {
-    "MAI_IMAGE_ENDPOINT": "https://<resource>.services.ai.azure.com/mai/v1/images/generations",
-    "MAI_IMAGE_DEPLOYMENT": "MAI-Image-2.5-Pro",
-    "MAI_IMAGE_API_KEY": "<key>",
-    "MAI_IMAGE_OUTPUT_DIR": "C:/Users/<you>/Pictures/ai",
-    "GPT_IMAGE_ENDPOINT": "https://<resource>.services.ai.azure.com",
-    "GPT_IMAGE_DEPLOYMENT": "gpt-image-2"
-  }
-}
-```
-
-Either backend alone is enough; configure both to switch per call. `GPT_IMAGE_API_KEY` is
-only needed when gpt-image lives on a different resource than the MAI deployment.
-
-Or set them as OS user environment variables (`setx` on Windows, `export` in your shell
-profile on macOS/Linux). Restart Claude Code either way.
-
-Then, in any session: *"run check_config"* or `/foundry-image:setup` for a guided pass.
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `MAI_IMAGE_ENDPOINT` | yes | Full URL ending in `/mai/v1/images/generations` |
-| `MAI_IMAGE_DEPLOYMENT` | yes | Deployment name in Foundry |
-| `MAI_IMAGE_API_KEY` | yes | Resource key |
-| `MAI_IMAGE_OUTPUT_DIR` | no | Default output folder; falls back to the OS temp dir |
-| `GPT_IMAGE_ENDPOINT` | for gpt-image | Resource base URL (`https://<resource>.services.ai.azure.com` or `.openai.azure.com`); a full `/openai/deployments/<name>/images/generations` URL also works |
-| `GPT_IMAGE_DEPLOYMENT` | for gpt-image | Deployment name, e.g. `gpt-image-2` |
-| `GPT_IMAGE_API_KEY` | no | Key for the gpt-image resource; defaults to `MAI_IMAGE_API_KEY` |
-| `GPT_IMAGE_API_VERSION` | no | Default `2025-04-01-preview` |
-| `IMAGE_DEFAULT_MODEL` | no | `mai` (default) or `gpt-image`: backend used when a call passes no `model` |
+| `GPT_IMAGE_ENDPOINT` | yes | Resource base URL (`https://<resource>.services.ai.azure.com` or `.openai.azure.com`) |
+| `GPT_IMAGE_API_KEY` | yes | Resource key |
+| `GPT_IMAGE_FLARE_DEPLOYMENT` | no | Deployment behind `flare_image`; default `gpt-image-2.5-flare` |
+| `GPT_IMAGE_SUNBURST_DEPLOYMENT` | no | Deployment behind `sunburst_image`; default `gpt-image-2.5-sunburst` |
+| `IMAGE_OUTPUT_DIR` | no | Default output folder; falls back to the OS temp dir |
 | `FOUNDRY_IMAGE_ENV_FILE` | no | Path of the env file; default `~/.claude/foundry-image.env` |
+
+Then, in any session: *"run check_config"* or `/foundry-image:setup` for a guided pass.
 
 ## Use
 
 Just ask: *"maak een hero image voor de README, donker, isometrisch, geen tekst"*.
-Claude expands the prompt, picks dimensions, writes the PNG (into the repo when it
-belongs there) and returns the path.
+Claude picks the model, expands the prompt, picks a size, writes the PNG (into the repo
+when it belongs there) and returns the path.
 
-Tool parameters, for reference:
+Parameters (same for both image tools):
 
-| Tool | Params |
+| Param | Meaning |
 |---|---|
-| `generate_image` | `prompt` (req), `width`, `height` (default 1024×1024), `output_path` (`.png`) |
-| `edit_image` | `image` (req, PNG/JPEG path), `prompt` (req), `output_path` |
-| `check_config` | — |
+| `prompt` (req) | Full description when generating; only the change when editing |
+| `image` | Path to a PNG/JPEG to edit. Omit to generate. The source is never modified. |
+| `size` | `WIDTHxHEIGHT` or `auto`. Default `1024x1024`; edits default to the input's own size |
+| `quality` | `low`, `medium` (default), `high`, `xhigh`, `max`, `auto` |
+| `output_path` | Where to write the `.png`; default a timestamped file in `IMAGE_OUTPUT_DIR` |
 
-Dimension rules from the MAI API: each side ≥ 768 px and width × height ≤ 1 048 576 px.
-With `model: "gpt-image"` the width/height only pick the aspect ratio; the API renders
-any size with both sides divisible by 16 (2048x1152 for 16:9; the classic 1536x1024 / 1024x1536 / 1024x1024 too) at `quality` low/medium/high; edits default to `auto` (input aspect) with `input_fidelity` high.
-So `1024x1024`, `1024x768`, `1280x800` work; `1024x1536` and `1920x1080` do not.
+Size rules: both sides divisible by 16, aspect ratio 1:3 to 3:1, no side above 3840 px,
+655,360–8,294,400 pixels in total (above 2560x1440 is experimental). So `1024x1024`,
+`1536x864`, `2048x1152`, `3840x2160` work; `768x768` (too few pixels) and `1000x1000`
+(not divisible by 16) do not.
+
+Quality drives cost and time: at 1024x1024, `low` is about 200 output tokens, `xhigh`
+about 3,100 and `max` about 7,000 (roughly a minute).
+
+## Upgrading from 1.x
+
+2.0 drops the MAI backend and the `generate_image` / `edit_image` tools with their `model`
+argument. `MAI_IMAGE_*`, `GPT_IMAGE_DEPLOYMENT`, `GPT_IMAGE_API_VERSION` and
+`IMAGE_DEFAULT_MODEL` are no longer read; `MAI_IMAGE_OUTPUT_DIR` is now `IMAGE_OUTPUT_DIR`,
+and `GPT_IMAGE_API_KEY` is required (it no longer falls back to the MAI key).
 
 ## Why env vars and not a config file or setup dialog?
 
 Claude Code plugins have no per-plugin secret storage or setup UI. The convention —
 same one the official GitHub plugin uses for its PAT — is `${VAR}` expansion in the
-plugin's `.mcp.json`, with the user setting the variables once. `settings.json → env`
-is the least-friction place for that: it travels with your Claude Code profile, applies
-to every project, and survives plugin updates.
+plugin's `.mcp.json`, with the user setting the variables once.
 
 If you want the key out of plaintext files, load it into the environment from a secret
 store at login (Key Vault, 1Password CLI, Windows Credential Manager) — the server does
@@ -120,8 +121,8 @@ not care where the variable comes from.
 npm test
 ```
 
-Runs an offline smoke test: MCP handshake, tool listing, dimension guards, missing-config
-errors, and checks that `check_config` never leaks a key.
+Runs an offline smoke test: MCP handshake, tool listing, size and quality guards,
+missing-config errors, env-file handling, and checks that `check_config` never leaks a key.
 
 ## License
 
