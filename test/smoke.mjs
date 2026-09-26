@@ -14,53 +14,38 @@ writeFileSync(
   envFile,
   [
     "# test env file",
-    "GPT_IMAGE_ENDPOINT=\"https://example.services.ai.azure.com\"",
-    "export GPT_IMAGE_DEPLOYMENT=gpt-image-2",
+    "GPT_IMAGE_ENDPOINT=\"https://file.example.services.ai.azure.com\"",
+    "export GPT_IMAGE_SUNBURST_DEPLOYMENT=my-sunburst",
     "GPT_IMAGE_API_KEY='file-key-1234567890abcdefghijklmnop'",
-    "MAI_IMAGE_ENDPOINT=https://ignored.example/mai/v1/images/generations",
     "",
   ].join("\n")
 );
 
 const env = { ...process.env };
-delete env.MAI_IMAGE_ENDPOINT;
-delete env.MAI_IMAGE_DEPLOYMENT;
-delete env.MAI_IMAGE_API_KEY;
-delete env.GPT_IMAGE_ENDPOINT;
-delete env.GPT_IMAGE_DEPLOYMENT;
-delete env.GPT_IMAGE_API_KEY;
-delete env.IMAGE_DEFAULT_MODEL;
+for (const name of [
+  "GPT_IMAGE_ENDPOINT",
+  "GPT_IMAGE_API_KEY",
+  "GPT_IMAGE_FLARE_DEPLOYMENT",
+  "GPT_IMAGE_SUNBURST_DEPLOYMENT",
+  "IMAGE_OUTPUT_DIR",
+]) {
+  delete env[name];
+}
 env.FOUNDRY_IMAGE_ENV_FILE = join(tmpdir(), "foundry-image-does-not-exist.env");
 
+const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
 const requests = [
   { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
   { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-  { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "check_config", arguments: {} } },
-  {
-    jsonrpc: "2.0",
-    id: 4,
-    method: "tools/call",
-    params: { name: "generate_image", arguments: { prompt: "x", width: 1024, height: 1536 } },
-  },
-  { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "generate_image", arguments: { prompt: "x" } } },
-  {
-    jsonrpc: "2.0",
-    id: 6,
-    method: "tools/call",
-    params: { name: "generate_image", arguments: { prompt: "x", model: "gpt-image" } },
-  },
-  {
-    jsonrpc: "2.0",
-    id: 7,
-    method: "tools/call",
-    params: { name: "generate_image", arguments: { prompt: "x", model: "dall-e" } },
-  },
-  {
-    jsonrpc: "2.0",
-    id: 8,
-    method: "tools/call",
-    params: { name: "generate_image", arguments: { prompt: "x", model: "gpt-image", size: "1000x1000" } },
-  },
+  call(3, "check_config", {}),
+  call(4, "flare_image", { prompt: "x" }),
+  call(5, "sunburst_image", { prompt: "x", size: "1000x1000" }),
+  call(6, "flare_image", { prompt: "x", size: "640x640" }),
+  call(7, "flare_image", { prompt: "x", size: "3840x1024" }),
+  call(8, "flare_image", { prompt: "x", quality: "ultra" }),
+  call(9, "flare_image", { prompt: "x", size: "wide" }),
+  call(10, "generate_image", { prompt: "x" }),
+  call(11, "flare_image", {}),
 ];
 
 const child = spawn(process.execPath, [server], { env, stdio: ["pipe", "pipe", "inherit"] });
@@ -68,12 +53,12 @@ let out = "";
 child.stdout.on("data", (d) => (out += d));
 child.stdin.write(requests.map((r) => JSON.stringify(r)).join("\n") + "\n");
 
-// second instance: same missing OS env, but an env file that completes the gpt-image backend
-// while MAI_IMAGE_ENDPOINT from the OS env (set here) must win over the file value.
-const fileEnv = { ...env, FOUNDRY_IMAGE_ENV_FILE: envFile, MAI_IMAGE_ENDPOINT: "https://os.example/mai/v1/images/generations" };
+// second instance: env file completes the config, while GPT_IMAGE_ENDPOINT from the OS env
+// (set here) must win over the file value.
+const fileEnv = { ...env, FOUNDRY_IMAGE_ENV_FILE: envFile, GPT_IMAGE_ENDPOINT: "https://os.example.services.ai.azure.com" };
 const fileRequests = [
   { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
-  { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "check_config", arguments: {} } },
+  call(2, "check_config", {}),
 ];
 const fileChild = spawn(process.execPath, [server], { env: fileEnv, stdio: ["pipe", "pipe", "inherit"] });
 let fileOut = "";
@@ -97,33 +82,42 @@ const check = setInterval(() => {
   fileChild.kill();
 
   const byId = Object.fromEntries(lines.map((l) => JSON.parse(l)).map((m) => [m.id, m.result]));
+  const text = (id) => byId[id]?.content?.[0]?.text || "";
   const failures = [];
   const expect = (cond, msg) => cond || failures.push(msg);
 
   expect(byId[1]?.serverInfo?.name === "foundry-image", "initialize: serverInfo.name");
-  const names = (byId[2]?.tools || []).map((t) => t.name).sort();
-  expect(names.join(",") === "check_config,edit_image,generate_image", `tools/list: got ${names}`);
-  expect(/Configuration incomplete/.test(byId[3]?.content?.[0]?.text), "check_config should report incomplete");
-  expect(!/[A-Za-z0-9]{20,}/.test(byId[3]?.content?.[0]?.text || ""), "check_config must not leak a key-like value");
-  expect(/exceeds the MAI limit/.test(byId[4]?.content?.[0]?.text), "1024x1536 must be rejected");
-  expect(byId[4]?.isError === true, "rejected call sets isError");
-  expect(/MAI_IMAGE_ENDPOINT is not configured/.test(byId[5]?.content?.[0]?.text), "missing config error");
-  expect(/GPT_IMAGE_ENDPOINT is not configured/.test(byId[6]?.content?.[0]?.text), "gpt-image missing config error");
-  expect(/model must be one of/.test(byId[7]?.content?.[0]?.text), "unknown model rejected");
-  expect(/divisible by 16/.test(byId[8]?.content?.[0]?.text), "bad gpt size (not /16) rejected");
+  const tools = byId[2]?.tools || [];
+  const names = tools.map((t) => t.name).sort();
+  expect(names.join(",") === "check_config,flare_image,sunburst_image", `tools/list: got ${names}`);
+  for (const t of tools.filter((t) => t.name !== "check_config")) {
+    expect(t.inputSchema?.properties?.image, `${t.name} exposes image (edit mode)`);
+    expect(t.inputSchema?.properties?.quality?.enum?.includes("max"), `${t.name} exposes max quality`);
+  }
+  expect(/Configuration incomplete/.test(text(3)), "check_config should report incomplete");
+  expect(/GPT_IMAGE_ENDPOINT: MISSING/.test(text(3)), "check_config names missing endpoint");
+  expect(/\(default\) gpt-image-2\.5-flare\s+-> flare_image/.test(text(3)), "check_config shows flare default");
+  expect(/GPT_IMAGE_ENDPOINT is not configured/.test(text(4)), "missing config error");
+  expect(byId[4]?.isError === true, "failed call sets isError");
+  expect(/divisible by 16/.test(text(5)), "size not /16 rejected");
+  expect(/at least 655360 pixels/.test(text(6)), "size below pixel budget rejected");
+  expect(/aspect ratio/.test(text(7)), "size wider than 3:1 rejected");
+  expect(/quality must be one of/.test(text(8)), "unknown quality rejected");
+  expect(/WIDTHxHEIGHT/.test(text(9)), "malformed size rejected");
+  expect(/Unknown tool: generate_image/.test(text(10)), "old tool name gone");
+  expect(/prompt is required/.test(text(11)), "missing prompt rejected");
+  expect(!/[A-Za-z0-9]{20,}/.test(text(3)), "check_config must not leak a key-like value");
+
   const fileReport = JSON.parse(fileLines[1])?.result?.content?.[0]?.text || "";
-  expect(/gpt-image: ready/.test(fileReport), "env file should complete the gpt-image backend");
-  expect(/GPT_IMAGE_ENDPOINT: https:\/\/example\.services\.ai\.azure\.com/.test(fileReport), "env file quotes stripped");
-  expect(/GPT_IMAGE_DEPLOYMENT: gpt-image-2/.test(fileReport), "env file export prefix accepted");
-  expect(/MAI_IMAGE_ENDPOINT: https:\/\/os\.example/.test(fileReport), "OS env must win over the env file");
+  expect(/Configuration OK/.test(fileReport), "env file should complete the config");
+  expect(/GPT_IMAGE_ENDPOINT: https:\/\/os\.example/.test(fileReport), "OS env must win over the env file");
+  expect(/GPT_IMAGE_SUNBURST_DEPLOYMENT: my-sunburst/.test(fileReport), "env file export prefix accepted");
   expect(/env file: .*\(loaded\)/.test(fileReport), "check_config reports the loaded env file");
   expect(!/file-key-1234567890/.test(fileReport), "env file key must not leak");
-  const gen = (byId[2]?.tools || []).find((t) => t.name === "generate_image");
-  expect(gen?.inputSchema?.properties?.model?.enum?.includes("gpt-image"), "generate_image exposes model enum");
 
   if (failures.length) {
     console.error("FAIL\n- " + failures.join("\n- "));
     process.exit(1);
   }
-  console.log("ok: handshake, tool list, guards (mai + gpt-image), check_config, env file");
+  console.log("ok: handshake, tool list, size/quality guards, check_config, env file");
 }, 50);

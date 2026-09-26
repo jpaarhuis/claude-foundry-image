@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "foundry-image",
-      "description": "Generate and edit images with an Azure AI Foundry image deployment. Adds generate_image / edit_image tools plus a skill that knows how to prompt them.",
+      "description": "Generate and edit images with gpt-image-2.5 on Azure AI Foundry. Adds flare_image (fast) and sunburst_image (detailed, precise edits) plus a skill that knows how to prompt them.",
       "source": "./",
       "category": "productivity"
     }

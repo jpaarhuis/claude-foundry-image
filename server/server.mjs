@@ -1,24 +1,19 @@
 #!/usr/bin/env node
-// Minimal MCP stdio server exposing Azure AI Foundry image deployments.
+// Minimal MCP stdio server exposing two Azure AI Foundry gpt-image-2.5 deployments as tools.
 // Zero dependencies: raw JSON-RPC 2.0 over stdin/stdout, global fetch (Node >= 18).
 //
-// Two backends, selected per call with the `model` argument (or IMAGE_DEFAULT_MODEL):
+// Tools, one per model; each generates from a prompt, or edits when `image` is given:
 //
-//   "mai"        MAI image API (e.g. MAI-Image-2.5-Pro)
-//     MAI_IMAGE_ENDPOINT     full generation URL, ending in /mai/v1/images/generations
-//     MAI_IMAGE_DEPLOYMENT   deployment name in Foundry
-//     MAI_IMAGE_API_KEY      API key for the resource
+//   flare_image      gpt-image-2.5-flare     fast, cheap, high quality for everyday images
+//   sunburst_image   gpt-image-2.5-sunburst  slower, most detail and the most precise edits
 //
-//   "gpt-image"  OpenAI-compatible Azure image API (gpt-image-2, gpt-image-1)
-//     GPT_IMAGE_ENDPOINT     resource base URL, e.g. https://<resource>.services.ai.azure.com, or the
-//                            full v1 URL .../openai/v1/images/generations as shown in the Foundry portal.
-//                            A legacy .../openai/deployments/<name>/images/generations URL also works.
-//     GPT_IMAGE_DEPLOYMENT   deployment name in Foundry (e.g. gpt-image-2); sent as `model` on the v1 route
-//     GPT_IMAGE_API_KEY      optional; falls back to MAI_IMAGE_API_KEY (same resource)
-//     GPT_IMAGE_API_VERSION  optional; legacy route only, default 2025-04-01-preview
-//
-//   IMAGE_DEFAULT_MODEL      optional; "mai" (default) or "gpt-image"
-//   MAI_IMAGE_OUTPUT_DIR     optional; where images land when no output_path is given
+// Both run on the OpenAI-compatible Azure v1 route (deployment sent as `model` in the body):
+//   GPT_IMAGE_ENDPOINT              resource base URL, e.g. https://<resource>.services.ai.azure.com
+//                                   (a full .../openai/v1/images/generations URL is trimmed to the base)
+//   GPT_IMAGE_API_KEY               key of that resource
+//   GPT_IMAGE_FLARE_DEPLOYMENT      optional; default gpt-image-2.5-flare
+//   GPT_IMAGE_SUNBURST_DEPLOYMENT   optional; default gpt-image-2.5-sunburst
+//   IMAGE_OUTPUT_DIR                optional; where images land when no output_path is given
 //
 // All of these can also live in an env file: ~/.claude/foundry-image.env by default, or the
 // path in FOUNDRY_IMAGE_ENV_FILE. Lines are KEY=VALUE (quotes and `export ` allowed, # comments).
@@ -51,19 +46,19 @@ function loadEnvFile(path) {
 
 const ENV_FILE_LOADED = loadEnvFile(ENV_FILE);
 
-const MAI_GEN_PATH = "/mai/v1/images/generations";
-const MAI_EDIT_PATH = "/mai/v1/images/edits";
-const MAI_MAX_PIXELS = 1048576;
-const MAI_MIN_DIMENSION = 768;
-const GPT_API_VERSION_DEFAULT = "2025-04-01-preview";
-const GPT_SIZES = ["1024x1024", "1536x1024", "1024x1536"];
-const GPT_QUALITIES = ["low", "medium", "high"];
-const MODELS = ["mai", "gpt-image"];
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const QUALITIES = ["low", "medium", "high", "xhigh", "max", "auto"];
+const MIN_PIXELS = 655360;
+const MAX_PIXELS = 8294400;
+const MAX_EDGE = 3840;
+const REQUIRED = ["GPT_IMAGE_ENDPOINT", "GPT_IMAGE_API_KEY"];
 
-const OUT_DIR = process.env.MAI_IMAGE_OUTPUT_DIR || join(tmpdir(), "mai-images");
-const MAI_REQUIRED = ["MAI_IMAGE_ENDPOINT", "MAI_IMAGE_DEPLOYMENT", "MAI_IMAGE_API_KEY"];
-const GPT_REQUIRED = ["GPT_IMAGE_ENDPOINT", "GPT_IMAGE_DEPLOYMENT"];
+const MODELS = {
+  flare: { tool: "flare_image", deploymentVar: "GPT_IMAGE_FLARE_DEPLOYMENT", fallback: "gpt-image-2.5-flare" },
+  sunburst: { tool: "sunburst_image", deploymentVar: "GPT_IMAGE_SUNBURST_DEPLOYMENT", fallback: "gpt-image-2.5-sunburst" },
+};
+
+const OUT_DIR = (process.env.IMAGE_OUTPUT_DIR || "").trim() || join(tmpdir(), "foundry-images");
 
 function env(name) {
   return (process.env[name] || "").trim();
@@ -75,161 +70,67 @@ function config(name) {
   return value;
 }
 
-function pickModel(args) {
-  const model = (args.model || env("IMAGE_DEFAULT_MODEL") || "mai").trim();
-  if (!MODELS.includes(model)) throw new Error(`model must be one of ${MODELS.join(", ")}`);
-  return model;
+function deployment(model) {
+  return env(MODELS[model].deploymentVar) || MODELS[model].fallback;
 }
 
-// ---------- MAI backend ----------
-
-function maiUrl(kind) {
-  const endpoint = config("MAI_IMAGE_ENDPOINT").replace(/\/+$/, "");
-  if (!endpoint.startsWith("https://") && !endpoint.startsWith("http://localhost")) {
-    throw new Error("MAI_IMAGE_ENDPOINT must be an HTTPS URL");
-  }
-  if (!endpoint.endsWith(MAI_GEN_PATH)) {
-    throw new Error(`MAI_IMAGE_ENDPOINT must end with ${MAI_GEN_PATH}`);
-  }
-  return kind === "generate" ? endpoint : endpoint.slice(0, -MAI_GEN_PATH.length) + MAI_EDIT_PATH;
-}
-
-function checkMaiDimensions(width, height) {
-  if (!Number.isInteger(width) || !Number.isInteger(height)) {
-    throw new Error("width and height must be integers");
-  }
-  if (width < MAI_MIN_DIMENSION || height < MAI_MIN_DIMENSION) {
-    throw new Error(`width and height must each be at least ${MAI_MIN_DIMENSION} pixels`);
-  }
-  if (width * height > MAI_MAX_PIXELS) {
-    throw new Error(`${width}x${height} exceeds the MAI limit of ${MAI_MAX_PIXELS} pixels`);
-  }
-}
-
-async function maiGenerate(args, width, height) {
-  checkMaiDimensions(width, height);
-  const res = await fetch(maiUrl("generate"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "api-key": config("MAI_IMAGE_API_KEY") },
-    body: JSON.stringify({ model: config("MAI_IMAGE_DEPLOYMENT"), prompt: args.prompt, width, height }),
-  });
-  if (!res.ok) throw new Error(`MAI API rejected the request (HTTP ${res.status}): ${await apiError(res)}`);
-  return {
-    image: decodePng(await res.json(), "MAI"),
-    label: `${width}x${height}, MAI ${config("MAI_IMAGE_DEPLOYMENT")}`,
-  };
-}
-
-async function maiEdit(args, bytes, mime, name) {
-  const form = new FormData();
-  form.set("model", config("MAI_IMAGE_DEPLOYMENT"));
-  form.set("prompt", args.prompt);
-  form.set("image", new Blob([bytes], { type: mime }), name);
-  const res = await fetch(maiUrl("edit"), {
-    method: "POST",
-    headers: { "api-key": config("MAI_IMAGE_API_KEY") },
-    body: form,
-  });
-  if (!res.ok) throw new Error(`MAI API rejected the request (HTTP ${res.status}): ${await apiError(res)}`);
-  return { image: decodePng(await res.json(), "MAI"), label: `MAI ${config("MAI_IMAGE_DEPLOYMENT")}` };
-}
-
-// ---------- gpt-image backend (OpenAI-compatible Azure API) ----------
-
-function gptKey() {
-  return env("GPT_IMAGE_API_KEY") || config("MAI_IMAGE_API_KEY");
-}
-
-// Two Azure routes exist. The v1 route (default) takes the deployment as `model` in the
-// body and needs no api-version; the legacy deployment-scoped route is used when the
-// configured endpoint already contains /openai/deployments/<name>.
-function gptRoute(kind) {
+function apiUrl(kind) {
   let endpoint = config("GPT_IMAGE_ENDPOINT").replace(/\/+$/, "").split("?")[0];
   if (!endpoint.startsWith("https://") && !endpoint.startsWith("http://localhost")) {
     throw new Error("GPT_IMAGE_ENDPOINT must be an HTTPS URL");
   }
-  const path = kind === "generate" ? "images/generations" : "images/edits";
-  endpoint = endpoint.replace(/\/images\/(generations|edits)$/, "");
-  if (/\/openai\/deployments\//.test(endpoint)) {
-    const version = env("GPT_IMAGE_API_VERSION") || GPT_API_VERSION_DEFAULT;
-    return { url: `${endpoint}/${path}?api-version=${encodeURIComponent(version)}`, model: null };
-  }
-  endpoint = endpoint.replace(/\/openai\/v1$/, "");
-  return { url: `${endpoint}/openai/v1/${path}`, model: config("GPT_IMAGE_DEPLOYMENT") };
+  endpoint = endpoint.replace(/\/openai(\/.*)?$/, "");
+  return `${endpoint}/openai/v1/images/${kind === "generate" ? "generations" : "edits"}`;
 }
 
-// gpt-image-2 accepts any WxH with both sides divisible by 16 (e.g. 2048x1152 for 16:9) and
-// "auto" (edits: same aspect as the input). The three classic sizes still work.
-function validGptSize(size) {
-  if (size === "auto" || GPT_SIZES.includes(size)) return true;
+// gpt-image-2.5 takes any WxH within these bounds, or "auto" (generate: the model picks;
+// edit: same aspect ratio as the input).
+function checkSize(size) {
+  if (size === "auto") return size;
   const m = /^(\d+)x(\d+)$/.exec(size);
-  return !!m && Number(m[1]) % 16 === 0 && Number(m[2]) % 16 === 0 && Number(m[1]) >= 256 && Number(m[2]) >= 256;
+  if (!m) throw new Error('size must be "auto" or WIDTHxHEIGHT, e.g. 1536x864');
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  const problems = [];
+  if (w % 16 || h % 16) problems.push("both sides must be divisible by 16");
+  if (Math.max(w, h) > MAX_EDGE) problems.push(`no side may exceed ${MAX_EDGE} px`);
+  if (Math.max(w, h) / Math.min(w, h) > 3) problems.push("aspect ratio must be between 1:3 and 3:1");
+  if (w * h < MIN_PIXELS) problems.push(`at least ${MIN_PIXELS} pixels in total (e.g. 1024x640, 816x816)`);
+  if (w * h > MAX_PIXELS) problems.push(`at most ${MAX_PIXELS} pixels in total (3840x2160)`);
+  if (problems.length) throw new Error(`size ${size} is invalid: ${problems.join("; ")}`);
+  return size;
 }
 
-function gptSize(args, width, height) {
-  if (args.size) {
-    if (!validGptSize(args.size)) {
-      throw new Error(`size must be ${GPT_SIZES.join(", ")}, auto, or WxH with both sides divisible by 16`);
-    }
-    return args.size;
+// Without an explicit size, an edit keeps the input's exact dimensions when the API accepts them;
+// "auto" alone keeps only the aspect ratio and may rescale (1536x864 came back as 1672x941).
+function editSize(bytes, isPng) {
+  if (!isPng) return "auto";
+  const size = pngSize(bytes);
+  try {
+    return checkSize(size);
+  } catch {
+    return "auto";
   }
-  if (args.width && args.height && validGptSize(`${width}x${height}`)) return `${width}x${height}`;
-  const ratio = width / height;
-  if (ratio > 1.15) return "1536x1024";
-  if (ratio < 0.87) return "1024x1536";
-  return "1024x1024";
 }
 
-function gptQuality(args) {
-  const quality = (args.quality || "medium").trim();
-  if (!GPT_QUALITIES.includes(quality)) throw new Error(`quality must be one of ${GPT_QUALITIES.join(", ")}`);
+function checkQuality(value) {
+  const quality = (value || "medium").trim();
+  if (!QUALITIES.includes(quality)) throw new Error(`quality must be one of ${QUALITIES.join(", ")}`);
   return quality;
 }
 
-async function gptGenerate(args, width, height) {
-  const size = gptSize(args, width, height);
-  const quality = gptQuality(args);
-  const route = gptRoute("generate");
-  const body = { prompt: args.prompt, size, quality, n: 1, output_format: "png" };
-  if (route.model) body.model = route.model;
-  const res = await fetch(route.url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "api-key": gptKey() },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`gpt-image API rejected the request (HTTP ${res.status}): ${await apiError(res)}`);
-  return {
-    image: decodePng(await res.json(), "gpt-image"),
-    label: `${size}, ${quality}, ${config("GPT_IMAGE_DEPLOYMENT")}`,
-  };
+async function callApi(url, init) {
+  const res = await fetch(url, { ...init, headers: { ...init.headers, "api-key": config("GPT_IMAGE_API_KEY") } });
+  if (!res.ok) throw new Error(`Azure image API rejected the request (HTTP ${res.status}): ${await apiError(res)}`);
+  return decodePng(await res.json());
 }
 
-async function gptEdit(args, bytes, mime, name) {
-  const route = gptRoute("edit");
-  const form = new FormData();
-  if (route.model) form.set("model", route.model);
-  form.set("prompt", args.prompt);
-  form.set("quality", gptQuality(args));
-  form.set("size", args.size ? gptSize(args, 1, 1) : "auto"); // auto = same aspect as the input
-  form.set("input_fidelity", "high"); // keep faces and details of the input
-  form.set("image", new Blob([bytes], { type: mime }), name);
-  const res = await fetch(route.url, {
-    method: "POST",
-    headers: { "api-key": gptKey() },
-    body: form,
-  });
-  if (!res.ok) throw new Error(`gpt-image API rejected the request (HTTP ${res.status}): ${await apiError(res)}`);
-  return { image: decodePng(await res.json(), "gpt-image"), label: config("GPT_IMAGE_DEPLOYMENT") };
-}
-
-// ---------- shared ----------
-
-function decodePng(payload, backend) {
+function decodePng(payload) {
   const b64 = payload?.data?.[0]?.b64_json;
-  if (!b64) throw new Error(`${backend} response did not contain data[0].b64_json image data`);
+  if (!b64) throw new Error("response did not contain data[0].b64_json image data");
   const image = Buffer.from(b64, "base64");
   if (image.length < 24 || !image.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    throw new Error(`${backend} returned data that is not a valid PNG`);
+    throw new Error("API returned data that is not a valid PNG");
   }
   return image;
 }
@@ -243,6 +144,10 @@ async function apiError(res) {
   } catch {
     return text.slice(0, 500);
   }
+}
+
+function pngSize(image) {
+  return `${image.readUInt32BE(16)}x${image.readUInt32BE(20)}`;
 }
 
 function outputPath(value, fallbackName) {
@@ -261,68 +166,56 @@ async function save(path, image) {
   return path;
 }
 
-async function generate(args) {
-  const model = pickModel(args);
-  const width = args.width ?? 1024;
-  const height = args.height ?? 1024;
-  const result =
-    model === "gpt-image" ? await gptGenerate(args, width, height) : await maiGenerate(args, width, height);
-  const path = await save(outputPath(args.output_path, stampedName("image")), result.image);
-  return `Image written to ${path} (${result.label})`;
-}
+async function run(model, args) {
+  if (!args.prompt) throw new Error("prompt is required");
+  const quality = checkQuality(args.quality);
+  const name = deployment(model);
+  let image;
 
-async function edit(args) {
-  const model = pickModel(args);
-  const source = resolve(process.cwd(), args.image);
-  const bytes = await readFile(source);
-  const isPng = bytes.subarray(0, 8).equals(PNG_SIGNATURE);
-  const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-  if (!isPng && !isJpeg) throw new Error("source image must be a PNG or JPEG file");
-  const mime = isPng ? "image/png" : "image/jpeg";
-  const name = basename(source);
-  const result = model === "gpt-image" ? await gptEdit(args, bytes, mime, name) : await maiEdit(args, bytes, mime, name);
-  const path = await save(outputPath(args.output_path, stampedName("edit")), result.image);
-  return `Edited image written to ${path} (${result.label})`;
+  if (args.image) {
+    const source = resolve(process.cwd(), args.image);
+    const bytes = await readFile(source);
+    const isPng = bytes.subarray(0, 8).equals(PNG_SIGNATURE);
+    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    if (!isPng && !isJpeg) throw new Error("source image must be a PNG or JPEG file");
+    const form = new FormData();
+    form.set("model", name);
+    form.set("prompt", args.prompt);
+    form.set("quality", quality);
+    form.set("size", checkSize(args.size || editSize(bytes, isPng)));
+    form.set("image", new Blob([bytes], { type: isPng ? "image/png" : "image/jpeg" }), basename(source));
+    image = await callApi(apiUrl("edit"), { method: "POST", headers: {}, body: form });
+  } else {
+    const body = { model: name, prompt: args.prompt, size: checkSize(args.size || "1024x1024"), quality, n: 1, output_format: "png" };
+    image = await callApi(apiUrl("generate"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  const path = await save(outputPath(args.output_path, stampedName(`${model}${args.image ? "-edit" : ""}`)), image);
+  return `${args.image ? "Edited image" : "Image"} written to ${path} (${pngSize(image)}, ${quality}, ${name})`;
 }
 
 function checkConfig() {
   const lines = [];
-  const report = (name, required) => {
+  let ok = true;
+  for (const name of REQUIRED) {
     const value = env(name);
     if (!value) {
-      lines.push(`${name}: ${required ? "MISSING" : "(not set)"}`);
-      return false;
+      ok = false;
+      lines.push(`${name}: MISSING`);
+    } else {
+      lines.push(name.endsWith("API_KEY") ? `${name}: set (${value.length} chars)` : `${name}: ${value}`);
     }
-    lines.push(name.endsWith("API_KEY") ? `${name}: set (${value.length} chars)` : `${name}: ${value}`);
-    return true;
-  };
-
-  lines.push("[mai backend]");
-  let maiOk = MAI_REQUIRED.map((n) => report(n, true)).every(Boolean);
-  const endpoint = env("MAI_IMAGE_ENDPOINT");
-  if (endpoint && !endpoint.replace(/\/+$/, "").endsWith(MAI_GEN_PATH)) {
-    maiOk = false;
-    lines.push(`MAI_IMAGE_ENDPOINT must end with ${MAI_GEN_PATH}`);
   }
-
-  lines.push("", "[gpt-image backend]");
-  const gptSet = GPT_REQUIRED.map((n) => report(n, false)).every(Boolean);
-  report("GPT_IMAGE_API_KEY", false);
-  lines.push(`GPT_IMAGE_API_VERSION: ${env("GPT_IMAGE_API_VERSION") || `(default) ${GPT_API_VERSION_DEFAULT}`}`);
-  const gptOk = gptSet && !!(env("GPT_IMAGE_API_KEY") || env("MAI_IMAGE_API_KEY"));
-  lines.push(
-    !gptOk
-      ? "gpt-image: not configured (optional)"
-      : env("GPT_IMAGE_API_KEY")
-        ? "gpt-image: ready"
-        : "gpt-image: ready with MAI_IMAGE_API_KEY (set GPT_IMAGE_API_KEY if the deployment is on another resource)"
-  );
-
-  lines.push("", `IMAGE_DEFAULT_MODEL: ${env("IMAGE_DEFAULT_MODEL") || "(default) mai"}`);
-  lines.push(`MAI_IMAGE_OUTPUT_DIR: ${env("MAI_IMAGE_OUTPUT_DIR") || `(default) ${OUT_DIR}`}`);
+  for (const model of Object.keys(MODELS)) {
+    const { tool, deploymentVar, fallback } = MODELS[model];
+    lines.push(`${deploymentVar}: ${env(deploymentVar) || `(default) ${fallback}`}  -> ${tool}`);
+  }
+  lines.push(`IMAGE_OUTPUT_DIR: ${env("IMAGE_OUTPUT_DIR") || `(default) ${OUT_DIR}`}`);
   lines.push(`env file: ${ENV_FILE} (${ENV_FILE_LOADED ? "loaded" : "not found"})`);
-
-  const ok = maiOk || gptOk;
   lines.unshift(ok ? "Configuration OK." : "Configuration incomplete.");
   if (!ok) {
     lines.push(
@@ -334,77 +227,78 @@ function checkConfig() {
   return lines.join("\n");
 }
 
-const MODEL_PROP = {
-  type: "string",
-  enum: MODELS,
-  description:
-    'Backend: "mai" (MAI image API, free width/height) or "gpt-image" (gpt-image-2 on the ' +
-    "OpenAI-compatible Azure API; sizes 1024x1024, 1536x1024, 1024x1536). Defaults to " +
-    'IMAGE_DEFAULT_MODEL or "mai".',
-};
+function imageSchema(defaultQualityNote) {
+  return {
+    type: "object",
+    properties: {
+      prompt: {
+        type: "string",
+        description:
+          "Without `image`: full description of the picture (subject, style, composition, light, colours). " +
+          "With `image`: only what to change, e.g. \"make the jacket red\".",
+      },
+      image: {
+        type: "string",
+        description: "Optional path to a PNG or JPEG. When given, the tool edits that image instead of generating a new one. The source file is never modified.",
+      },
+      size: {
+        type: "string",
+        description:
+          'WIDTHxHEIGHT or "auto". Both sides divisible by 16, aspect ratio 1:3 to 3:1, no side above 3840, ' +
+          "655,360 to 8,294,400 pixels in total (above 2560x1440 is experimental). Examples: 1024x1024, " +
+          "1536x864 (16:9), 864x1536 (9:16), 1536x1024, 2048x1152, 3840x2160. Default: 1024x1024 when " +
+          "generating; when editing, the input's own dimensions (or \"auto\", same aspect ratio, if those " +
+          "fall outside the limits).",
+      },
+      quality: {
+        type: "string",
+        enum: QUALITIES,
+        description: `low, medium, high, xhigh, max or auto. Cost and time rise steeply: at 1024x1024 low is ~200 output tokens, xhigh ~3,100, max ~7,000. ${defaultQualityNote}`,
+      },
+      output_path: {
+        type: "string",
+        description:
+          "Where to write the PNG. Must end in .png. Relative paths resolve against the current working " +
+          "directory. Defaults to a timestamped file in the output directory.",
+      },
+    },
+    required: ["prompt"],
+  };
+}
 
 const TOOLS = [
   {
+    name: "flare_image",
+    description:
+      "Generate or edit an image with gpt-image-2.5-flare on Azure AI Foundry: the FAST, default choice. " +
+      "Use it for everyday images where speed and volume matter: blog and social visuals, thumbnails, " +
+      "illustrations, icons, concept sketches, drafts and variations, and quick edits. Typically 15-25 s " +
+      "per image at low/medium quality. Reach for sunburst_image " +
+      "instead only when the result must hold intricate detail or an edit must change exactly one thing " +
+      "and leave everything else untouched. Pass `image` to edit an existing PNG/JPEG. The PNG is written " +
+      "to disk and the tool returns its path; the image is not returned inline.",
+    inputSchema: imageSchema("Default medium; low for drafts, high for finished work."),
+  },
+  {
+    name: "sunburst_image",
+    description:
+      "Generate or edit an image with gpt-image-2.5-sunburst on Azure AI Foundry: the MOST DETAILED and " +
+      "most PRECISE model, and slower than flare_image. Use it for final, polished deliverables " +
+      "(campaign visuals, product shots, hero images, dense scenes with many small details) and above " +
+      "all for precise edits: change one element of an existing image while keeping the rest intact, " +
+      "or refine the same image over several edit rounds. Each call takes noticeably longer than " +
+      "flare_image; for drafts and quick variations use flare_image. Pass `image` to edit " +
+      "an existing PNG/JPEG. The PNG is written to disk and the tool returns its path; the image is not " +
+      "returned inline.",
+    inputSchema: imageSchema("Default medium; high or xhigh for final deliverables."),
+  },
+  {
     name: "check_config",
     description:
-      "Report whether the Foundry image server is configured (which environment variables are " +
-      "set, endpoints and deployments in use, which backends are ready, output directory). " +
-      "Never reveals the API keys. Call this first when a generation fails with a configuration error.",
+      "Report whether the Foundry image server is configured (endpoint, which deployments back " +
+      "flare_image and sunburst_image, output directory, env file). Never reveals the API key. Call " +
+      "this first when a call fails with a configuration error.",
     inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "generate_image",
-    description:
-      "Generate a PNG image on Azure AI Foundry. The image is written to disk and the tool " +
-      "returns its path; it is not returned inline. Use a detailed prompt covering subject, " +
-      'style, composition, lighting and colors. With model "mai": each side must be at least ' +
-      "768 pixels and width x height must not exceed 1048576 pixels (1024x1024, 1280x800, " +
-      '768x1024 are valid; 1024x1536 is not). With model "gpt-image" (gpt-image-2): any width/height ' +
-      "with both sides divisible by 16 is rendered as-is (2048x1152 for 16:9, 1024x1024, 1536x1024 ...); " +
-      "other values fall back to the nearest of 1536x1024 / 1024x1536 / 1024x1024. Pass `quality` " +
-      "low/medium/high (default medium).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        prompt: { type: "string", description: "Description of the image to generate." },
-        width: { type: "integer", description: "Image width in pixels. Default 1024." },
-        height: { type: "integer", description: "Image height in pixels. Default 1024." },
-        model: MODEL_PROP,
-        quality: { type: "string", enum: GPT_QUALITIES, description: "gpt-image only. Default medium." },
-        size: {
-          type: "string",
-          description: "gpt-image only: explicit size (WxH, both divisible by 16, or auto). Overrides width/height.",
-        },
-        output_path: {
-          type: "string",
-          description:
-            "Where to write the PNG. Must end in .png. Relative paths resolve against the " +
-            "current working directory. Defaults to a timestamped file in the output directory.",
-        },
-      },
-      required: ["prompt"],
-    },
-  },
-  {
-    name: "edit_image",
-    description:
-      "Edit an existing PNG or JPEG on Azure AI Foundry, following a text instruction. The " +
-      "result is written to disk as a PNG and the tool returns its path. The source file is " +
-      'never modified. Pick the backend with `model` ("mai" or "gpt-image"). With gpt-image the ' +
-      "result keeps the input's aspect ratio (size auto) and faces/details (input_fidelity high) " +
-      "unless `size` is given.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        image: { type: "string", description: "Path to the source PNG or JPEG." },
-        prompt: { type: "string", description: "What to change in the image." },
-        model: MODEL_PROP,
-        quality: { type: "string", enum: GPT_QUALITIES, description: "gpt-image only. Default medium." },
-        size: { type: "string", description: "gpt-image only: output size (WxH, both divisible by 16, or auto = input aspect)." },
-        output_path: { type: "string", description: "Where to write the result. Must end in .png." },
-      },
-      required: ["image", "prompt"],
-    },
   },
 ];
 
@@ -418,7 +312,7 @@ async function handle(req) {
     return {
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
-      serverInfo: { name: "foundry-image", version: "1.1.0" },
+      serverInfo: { name: "foundry-image", version: "2.0.0" },
     };
   }
   if (method === "tools/list") return { tools: TOOLS };
@@ -426,8 +320,8 @@ async function handle(req) {
   if (method === "tools/call") {
     const args = params?.arguments || {};
     if (params?.name === "check_config") return { content: [{ type: "text", text: checkConfig() }] };
-    if (params?.name === "generate_image") return { content: [{ type: "text", text: await generate(args) }] };
-    if (params?.name === "edit_image") return { content: [{ type: "text", text: await edit(args) }] };
+    const model = Object.keys(MODELS).find((m) => MODELS[m].tool === params?.name);
+    if (model) return { content: [{ type: "text", text: await run(model, args) }] };
     throw new Error(`Unknown tool: ${params?.name}`);
   }
   throw new Error(`Unknown method: ${method}`);
